@@ -15,6 +15,8 @@ int main()
     cout << "3. Make sure to enter the right number of total images" << endl;
     cout << "4. This will take a while lmao" << endl;
     cout << "==========================================================" << endl << endl;
+
+    // User inputs
     cout << "Total input images: ";
     cin >> totalImages;
 
@@ -23,24 +25,31 @@ int main()
 
     int imgCount = 1;
 
+    // The loop will pass through each image and merge them with every other image
+
     for (int i = 1; i <= totalImages && imgCount <= 1225; i++) {
         for (int j = 1; j <= totalImages; j++) {
+
             // Load images
+
             Mat img1 = imread("images/" + std::to_string(i) + ".png");
             Mat img2 = imread("images/" + std::to_string(j) + ".png");
 
+            // Resize images
 
             int height = 2048;
             int width = 2048;
             resize(img1, img1, Size(resolution, resolution), INTER_LINEAR);
             resize(img2, img2, Size(resolution, resolution), INTER_LINEAR);
 
-            Mat res;
-            double alpha = 0.55;
-            double beta = (1.0 - alpha);
-            addWeighted(img1, alpha, img2, beta, 0.0, res);
+            // Create the result
 
-            // Save the frame into a file
+            Mat res; // empty pixel matrix
+            double alpha = 0.55; // transparency of the image on top
+            double beta = (1.0 - alpha);
+            addWeighted(img1, alpha, img2, beta, 0.0, res); // blend the 2 images and output the result into res
+
+            // Save res as png
             imwrite("outputs/" + std::to_string(imgCount) + ".png", res); // A PNG FILE IS BEING SAVED
 
             imgCount++;
