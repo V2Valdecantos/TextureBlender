@@ -380,9 +380,10 @@ public:
                         if (unprojected_indices[j] < shape_src[unreduced_axes[j]]) {
                             break;
                         }
-                        unprojected_indices[j] = 0;
+                        unprojected_indices[j] -= shape_src[unreduced_axes[j]];
+                        current_step -= shape_src[unreduced_axes[j]] * steps_src[unreduced_axes[j]];
                         ++unprojected_indices[j - 1];
-                        current_step = steps_src[unreduced_axes[j - 1]];
+                        current_step += steps_src[unreduced_axes[j - 1]];
                     }
                 }
             }
@@ -425,7 +426,7 @@ public:
             dtype* p_dst = dst.ptr<dtype>();
 
             size_t main_index = start / last_unreduced_dim;
-            size_t loop = start / last_unreduced_dim;
+            size_t loop = start % last_unreduced_dim;
             size_t origin = unprojected_steps[main_index] + loop * last_unreduced_step;
             for (int i = start; i < end; ++i) {
                 Op accumulator(n_reduce, p_src[origin + projected_steps[0]]);
@@ -456,7 +457,7 @@ public:
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
-        if (inputs_arr.depth() == CV_16S)
+        if (inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;

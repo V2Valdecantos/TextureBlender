@@ -50,7 +50,7 @@ int main()
             addWeighted(img1, alpha, img2, beta, 0.0, res); // blend the 2 images and output the result into res
 
             // Save res as png
-            imwrite("outputs/" + std::to_string(imgCount) + ".png", res); // A PNG FILE IS BEING SAVED
+            imwrite("outputs/Texture_" + std::to_string(i) + "+" + "Texture_"  + std::to_string(j) + ".png", res); // A PNG FILE IS BEING SAVED
 
             imgCount++;
         }

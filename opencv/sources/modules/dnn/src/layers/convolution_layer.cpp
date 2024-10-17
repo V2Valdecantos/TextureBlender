@@ -62,9 +62,6 @@
 #include "opencl_kernels_dnn.hpp"
 using namespace cv::dnn::ocl4dnn;
 #endif
-#ifdef HAVE_TENGINE
-#include "../tengine4dnn/include/tengine_graph_convolution.hpp"
-#endif
 
 #ifdef HAVE_CUDA
 #include "../cuda4dnn/primitives/convolution.hpp"
@@ -143,7 +140,7 @@ public:
         }
 
         const Mat &input = inputs[0];
-        CV_Assert(((input.dims == 3 && kernel_size.size() == 1) || input.dims == 4 || input.dims == 5) && (input.type() == CV_32F || input.type() == CV_16S));
+        CV_Assert(((input.dims == 3 && kernel_size.size() == 1) || input.dims == 4 || input.dims == 5) && (input.type() == CV_32F || input.type() == CV_16F));
         for (size_t i = 0; i < outputs.size(); i++)
         {
             CV_Assert(inputs[i].type() == input.type());
@@ -245,8 +242,6 @@ public:
 };
 
 
-#define IS_POWER_LAYER(layer) \
-            (!layer.empty() && !layer->type.compare("Power"))
 //TODO: simultaneously convolution and bias addition for cache optimization
 class ConvolutionLayerImpl CV_FINAL : public BaseConvolutionLayerImpl
 {
@@ -265,10 +260,6 @@ public:
     bool newActiv;
     ocl4dnnFusedActiv_t activType;
     float power;
-#endif
-
-#ifdef HAVE_TENGINE
-    teng_graph_t tengine_graph;
 #endif
 
 #ifdef HAVE_CUDA
@@ -290,19 +281,7 @@ public:
         cudaFusionMode = cuda4dnn::ConvolutionConfiguration::FusionMode::NONE;
         cudaActType = cuda4dnn::ConvolutionConfiguration::ActivationType::IDENTITY;
 #endif
-#ifdef HAVE_TENGINE
-        tengine_graph=NULL;
-#endif
     }
-#ifdef HAVE_TENGINE
-    ~ConvolutionLayerImpl()
-    {
-        if(NULL != tengine_graph )
-        {
-            tengine_release(tengine_graph);
-        }
-    }
-#endif
 
     MatShape computeColRowShape(const MatShape &inpShape, const MatShape &outShape) const CV_OVERRIDE
     {
@@ -466,13 +445,6 @@ public:
             for(int i = 0; i < numOutput; i++ )
                 biasvec[i] = biasMat.at<float>(i);
         }
-#ifdef HAVE_TENGINE
-        if(NULL != tengine_graph )
-        {
-            tengine_release(tengine_graph);
-            tengine_graph = NULL ;
-        }
-#endif
 #ifdef HAVE_OPENCL
         convolutionOp.release();
 #endif
@@ -848,13 +820,13 @@ public:
         CV_Assert(!blobs.empty());
         CV_Assert_N(inputs.size() >= 1, nodes.size() >= 1);
         auto& ieInpNode = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
-        std::vector<size_t> dims = ieInpNode->get_shape();
+        std::vector<size_t> dims = ieInpNode.get_shape();
         CV_Check(dims.size(), dims.size() >= 3 && dims.size() <= 5, "");
-        std::shared_ptr<ngraph::Node> ieWeights = nodes.size() > 1 ? nodes[1].dynamicCast<InfEngineNgraphNode>()->node : nullptr;
+        ov::Output<ov::Node> ieWeights;
         if (nodes.size() > 1)
-            CV_Assert(ieWeights);  // dynamic_cast should not fail
+            ieWeights = nodes[1].dynamicCast<InfEngineNgraphNode>()->node;
         const int inpCn = dims[1];
-        const int inpGroupCn = nodes.size() > 1 ? ieWeights->get_shape()[1] : blobs[0].size[1];
+        const int inpGroupCn = nodes.size() > 1 ? ieWeights.get_shape()[1] : blobs[0].size[1];
         const int group = inpCn / inpGroupCn;
 
         std::vector<size_t> kernel_shape;
@@ -868,49 +840,49 @@ public:
 
         if (nodes.size() == 1)
         {
-            ieWeights = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, kernel_shape, blobs[0].data);
+            ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, blobs[0].data);
             if (fusedWeights)
             {
                 if (weightsMat.isContinuous())
                 {
-                    ieWeights = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, kernel_shape, weightsMat.data);
+                    ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, weightsMat.data);
                 }
                 else
                 {
                     Mat newWeights;
                     Mat cvWeights = weightsMat.colRange(0, blobs[0].total() / numOutput);
                     cvWeights.copyTo(newWeights);
-                    ieWeights = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, kernel_shape, newWeights.data);
+                    ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, newWeights.data);
                 }
             }
         }
         else
         {
-            auto shape = std::make_shared<ngraph::op::Constant>(ngraph::element::i64,
-                             ngraph::Shape{kernel_shape.size()}, std::vector<int64_t>(kernel_shape.begin(), kernel_shape.end()));
-            ieWeights  = std::make_shared<ngraph::op::v1::Reshape>(ieWeights, shape, true);
+            auto shape = std::make_shared<ov::op::v0::Constant>(ov::element::i64,
+                             ov::Shape{kernel_shape.size()}, std::vector<int64_t>(kernel_shape.begin(), kernel_shape.end()));
+            ieWeights  = std::make_shared<ov::op::v1::Reshape>(ieWeights, shape, true);
         }
 
-        ngraph::op::PadType pad_type = ngraph::op::PadType::EXPLICIT;
+        ov::op::PadType pad_type = ov::op::PadType::EXPLICIT;
         if (!padMode.empty())
-            pad_type = padMode == "VALID" ? ngraph::op::PadType::VALID : ngraph::op::PadType::SAME_UPPER;
+            pad_type = padMode == "VALID" ? ov::op::PadType::VALID : ov::op::PadType::SAME_UPPER;
 
-        std::shared_ptr<ngraph::Node> conv_node;
+        std::shared_ptr<ov::Node> conv_node;
         if (group != 1) {
-            conv_node = std::make_shared<ngraph::op::v1::GroupConvolution>(
+            conv_node = std::make_shared<ov::op::v1::GroupConvolution>(
                                 ieInpNode, ieWeights,
-                                ngraph::Strides(strides),
-                                ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
-                                ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_end.begin(),   pads_end.end())),
-                                ngraph::Strides(dilations),
+                                ov::Strides(strides),
+                                ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
+                                ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_end.begin(),   pads_end.end())),
+                                ov::Strides(dilations),
                                 pad_type);
         } else {
-            conv_node = std::make_shared<ngraph::op::v1::Convolution>(
+            conv_node = std::make_shared<ov::op::v1::Convolution>(
                                 ieInpNode, ieWeights,
-                                ngraph::Strides(strides),
-                                ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
-                                ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_end.begin(), pads_end.end())),
-                                ngraph::Strides(dilations),
+                                ov::Strides(strides),
+                                ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
+                                ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_end.begin(), pads_end.end())),
+                                ov::Strides(dilations),
                                 pad_type);
         }
 
@@ -918,18 +890,18 @@ public:
         {
             std::vector<size_t> shape(conv_node->get_shape().size(), 1);
             shape[1] = conv_node->get_shape()[1];
-            std::shared_ptr<ngraph::Node> bias;
+            std::shared_ptr<ov::Node> bias;
             if (nodes.size() == 3)
             {
-                auto bias_shape = std::make_shared<ngraph::op::Constant>(ngraph::element::i64,
-                                    ngraph::Shape{shape.size()}, std::vector<int64_t>(shape.begin(), shape.end()));
-                bias = std::make_shared<ngraph::op::v1::Reshape>(nodes[2].dynamicCast<InfEngineNgraphNode>()->node, bias_shape, true);
+                auto bias_shape = std::make_shared<ov::op::v0::Constant>(ov::element::i64,
+                                    ov::Shape{shape.size()}, std::vector<int64_t>(shape.begin(), shape.end()));
+                bias = std::make_shared<ov::op::v1::Reshape>(nodes[2].dynamicCast<InfEngineNgraphNode>()->node, bias_shape, true);
             }
             else
             {
-                bias = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, ngraph::Shape(shape), biasvec.data());
+                bias = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape(shape), biasvec.data());
             }
-            auto conv_bias = std::make_shared<ngraph::op::v1::Add>(conv_node, bias, ngraph::op::AutoBroadcastType::NUMPY);
+            auto conv_bias = std::make_shared<ov::op::v1::Add>(conv_node, bias, ov::op::AutoBroadcastType::NUMPY);
             return Ptr<BackendNode>(new InfEngineNgraphNode(conv_bias));
         }
         return Ptr<BackendNode>(new InfEngineNgraphNode(conv_node));
@@ -1051,7 +1023,7 @@ public:
         std::vector<UMat> inputs;
         std::vector<UMat> outputs;
 
-        bool use_half = (inps.depth() == CV_16S);
+        bool use_half = (inps.depth() == CV_16F);
         inps.getUMatVector(inputs);
         outs.getUMatVector(outputs);
 
@@ -1065,6 +1037,7 @@ public:
             umat_blobs.resize(n);
             for (size_t i = 0; i < n; i++)
             {
+                CV_Assert(!use_half);  // TODO: not implemented
                 inputs[i + 1].copyTo(umat_blobs[i]);
             }
             inputs.resize(1);
@@ -1077,7 +1050,7 @@ public:
             for (size_t i = 0; i < n; i++)
             {
                 if (use_half)
-                    convertFp16(blobs[i], umat_blobs[i]);
+                    blobs[i].convertTo(umat_blobs[i], CV_16F);
                 else
                     blobs[i].copyTo(umat_blobs[i]);
             }
@@ -1095,7 +1068,7 @@ public:
             config.pads = pads;
             config.stride = stride;
             config.dilation = dilation;
-            if (inputs[0].dims != 4 && inputs[0].dims != umat_blobs[0].dims)
+            if (inputs[0].dims != 4 && inputs[0].dims != (blobs.empty() ? umat_blobs[0].dims : blobs[0].dims))
             {
                 static bool bypassCheck = utils::getConfigurationParameterBool("OPENCV_OCL4DNN_CONVOLUTION_IGNORE_INPUT_DIMS_4_CHECK", false);
                 if (!bypassCheck)
@@ -1107,7 +1080,7 @@ public:
                     return false;
                 }
             }
-            config.group = inputs[0].size[1] / umat_blobs[0].size[1];
+            config.group = inputs[0].size[1] / (blobs.empty() ? umat_blobs[0].size[1] : blobs[0].size[1]);
             if (config.group < 1)  // config.group == 0 causes div by zero in ocl4dnn code
             {
                 CV_LOG_WARNING(NULL, "DNN/OpenCL: Unsupported config.group=" << config.group
@@ -1158,7 +1131,7 @@ public:
         if (fusedWeights)
         {
             if (use_half)
-                convertFp16(weightsMat, umat_blobs[0]);
+                weightsMat.convertTo(umat_blobs[0], CV_16F);
             else
                 weightsMat.copyTo(umat_blobs[0]);
             fusedWeights = false;
@@ -1168,7 +1141,7 @@ public:
             if ( umat_blobs.size() < 2 )
                 umat_blobs.resize(2);
             if (use_half)
-                convertFp16(Mat(biasvec, true), umat_blobs[1]);
+                Mat(biasvec, true).convertTo(umat_blobs[1], CV_16F);
             else
                 Mat(biasvec, true).copyTo(umat_blobs[1]);
             convolutionOp->setBias(true);
@@ -1231,7 +1204,7 @@ public:
         CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
                    forward_ocl(inputs_arr, outputs_arr, internals_arr))
 
-        if (inputs_arr.depth() == CV_16S)
+        if (inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;
@@ -1305,65 +1278,6 @@ public:
             }
         }
 
-#ifdef HAVE_TENGINE
-        bool tengine_ret = false;
-
-        std::vector<Mat> teng_in, teng_out;
-        inputs_arr.getMatVector(teng_in);
-        outputs_arr.getMatVector(teng_out);
-
-        int inch = teng_in[0].size[1];    // inch
-        int in_h = teng_in[0].size[2];    // in_h
-        int in_w = teng_in[0].size[3];    // in_w
-
-        int out_b = teng_out[0].size[0];  // out batch size
-        int outch = teng_out[0].size[1];  // outch
-        int out_h = teng_out[0].size[2];  // out_h
-        int out_w = teng_out[0].size[3];  // out_w
-
-        float *input_  = teng_in[0].ptr<float>();
-        float *output_ = teng_out[0].ptr<float>();
-        float *kernel_ = weightsMat.ptr<float>();
-        float *teg_bias = &biasvec[0];
-
-        int nstripes = std::max(getNumThreads(), 1);
-
-        /* tengine_init will run when first time. */
-        if(NULL == tengine_graph)
-        {
-            // pads_begin: 0 - pad_top,    1 - pad_left
-            // pads_end:   0 - pad_bottom, 1 - pad_right
-            // pad_h0: pad_top,  pad_h1: pad_bottom
-            // pad_w0: pad_left, pad_w1: pad_right
-            tengine_graph = tengine_init(name.c_str(), input_, inch, ngroups, in_h, in_w,
-                                         output_, out_b, outch, out_h, out_w,
-                                         kernel_, kernel_size.size(), kernel.height, kernel.width,
-                                         teg_bias, stride.height, stride.width,
-                                         pads_begin[0], pads_end[0], pads_begin[1], pads_end[1], dilation.height, dilation.width,
-                                         weightsMat.step1(), padMode, tengine_graph, nstripes);
-            // printf("Init(%s):  input=%p(%d %d %d %d ),output=%p(%d %d %d %d ),kernel=%p(%ld %d %d ), bias=%p ,"
-            //        "stride(%d %d), pad(%d %d %d %d), dilation(%d %d) ,weightsMat=%ld, padMode=%s ,tengine_graph = %p \n",
-            //        name.c_str(),input_, inch, ngroups, in_h, in_w,
-            //        output_, out_b, outch, out_h, out_w,
-            //        kernel_, kernel_size.size(), kernel.height, kernel.width,
-            //        teg_bias, stride.height, stride.width,
-            //        pads_begin[0], pads_end[0], pads_begin[1], pads_end[1], dilation.height, dilation.width,
-            //        weightsMat.step1(), padMode.c_str() ,tengine_graph);
-        }
-        if(NULL != tengine_graph)
-        {
-            tengine_ret = tengine_forward(tengine_graph);
-        }
-        /* activation */
-        if((true == tengine_ret) && activ )
-        {
-            int out_cstep = out_h * out_w;	    // out_cstep
-
-            ActivationLayer* activ_ = activ.get();
-            activ_->forwardSlice(output_, output_, out_cstep, out_cstep, 0, outch);
-        }
-        if(false == tengine_ret)
-#endif
         {
             int nstripes = std::max(getNumThreads(), 1);
             int conv_dim = CONV_2D;
@@ -1385,6 +1299,10 @@ public:
                 fastConvImpl = initFastConv(weightsMat, &biasvec[0], ngroups, K, C, kernel_size, strides,
                                             dilations, pads_begin, pads_end, conv_dim,
                                             preferableTarget == DNN_TARGET_CPU_FP16, canUseWinograd);
+                // This is legal to release weightsMat here as this is not used anymore for
+                // OpenCV inference. If network needs to be reinitialized (new shape, new backend)
+                // a new version of weightsMat is created at .finalize() from original weights
+                weightsMat.release();
             }
 
             runFastConv(inputs[0], outputs[0], fastConvImpl, nstripes, activ, reluslope, fusedAdd);
@@ -1491,6 +1409,7 @@ public:
         params.set("input_zeropoint", inputZp);
         params.set("input_scale", inputScale);
 
+        Mat weightsMat = blobs[0].reshape(1, numOutput);
         Mat weightsQuantized(weightsMat.rows, weightsMat.cols, CV_8S);
         Mat biasQuantized(1, numOutput, CV_32S);
         Mat outputMultiplier(1, numOutput, CV_32F);
@@ -1970,7 +1889,7 @@ public:
         std::vector<UMat> outputs;
         std::vector<UMat> internals;
 
-        if (inputs_.depth() == CV_16S)
+        if (inputs_.depth() == CV_16F)
             return false;
 
         inputs_.getUMatVector(inputs);
@@ -2077,7 +1996,7 @@ public:
         CV_OCL_RUN(IS_DNN_OPENCL_TARGET(preferableTarget),
                    forward_ocl(inputs_arr, outputs_arr, internals_arr));
 
-        if (inputs_arr.depth() == CV_16S)
+        if (inputs_arr.depth() == CV_16F)
         {
             forward_fallback(inputs_arr, outputs_arr, internals_arr);
             return;
@@ -2338,13 +2257,13 @@ public:
 
        auto& ieInpNode = nodes[0].dynamicCast<InfEngineNgraphNode>()->node;
        std::vector<size_t> kernel_shape = getShape<size_t>(blobs[0]);
-       auto ieWeights = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, kernel_shape, blobs[0].data);
+       auto ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, blobs[0].data);
 
         if (fusedWeights)
         {
             Mat newWeights;
             transpose(weightsMat, newWeights);
-            ieWeights = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, kernel_shape, newWeights.data);
+            ieWeights = std::make_shared<ov::op::v0::Constant>(ov::element::f32, kernel_shape, newWeights.data);
         }
         std::vector<size_t> paddings_end;
         if (padMode == "SAME")
@@ -2356,24 +2275,24 @@ public:
         } else {
             paddings_end = pads_end;
         }
-        ngraph::op::PadType pad_type = padMode == "VALID" ? ngraph::op::PadType::VALID : ngraph::op::PadType::EXPLICIT;
+        ov::op::PadType pad_type = padMode == "VALID" ? ov::op::PadType::VALID : ov::op::PadType::EXPLICIT;
 
-        auto deconv = std::make_shared<ngraph::op::v1::ConvolutionBackpropData>(
+        auto deconv = std::make_shared<ov::op::v1::ConvolutionBackpropData>(
                           ieInpNode,
                           ieWeights,
-                          ngraph::Strides(strides),
-                          ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
-                          ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(paddings_end.begin(), paddings_end.end())),
-                          ngraph::Strides(dilations),
+                          ov::Strides(strides),
+                          ov::CoordinateDiff(std::vector<std::ptrdiff_t>(pads_begin.begin(), pads_begin.end())),
+                          ov::CoordinateDiff(std::vector<std::ptrdiff_t>(paddings_end.begin(), paddings_end.end())),
+                          ov::Strides(dilations),
                           pad_type,
-                          ngraph::CoordinateDiff(std::vector<std::ptrdiff_t>(adjust_pads.begin(), adjust_pads.end())));
+                          ov::CoordinateDiff(std::vector<std::ptrdiff_t>(adjust_pads.begin(), adjust_pads.end())));
 
         if (hasBias() || fusedBias)
         {
             std::vector<size_t> shape(deconv->get_shape().size(), 1);
             shape[1] = numOutput;
-            auto bias = std::make_shared<ngraph::op::Constant>(ngraph::element::f32, ngraph::Shape(shape), blobs[1].data);
-            auto deconv_bias = std::make_shared<ngraph::op::v1::Add>(deconv, bias, ngraph::op::AutoBroadcastType::NUMPY);
+            auto bias = std::make_shared<ov::op::v0::Constant>(ov::element::f32, ov::Shape(shape), blobs[1].data);
+            auto deconv_bias = std::make_shared<ov::op::v1::Add>(deconv, bias, ov::op::AutoBroadcastType::NUMPY);
             return Ptr<BackendNode>(new InfEngineNgraphNode(deconv_bias));
         }
 
